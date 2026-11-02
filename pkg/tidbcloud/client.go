@@ -1,6 +1,5 @@
-// Package tidbcloud is a small client for the TiDB Cloud Serverless OpenAPI
-// (v1beta1). It covers the Export and Changefeed services that tidb2snowflake
-// uses to drive a snapshot export and an incremental changefeed for a cluster.
+// Package tidbcloud provides TiDB Cloud cluster discovery and the Serverless
+// v1beta1 and Premium v1beta2 export/changefeed APIs.
 //
 // Authentication uses an API key (public/private) over HTTP Digest, matching
 // the TiDB Cloud Serverless OpenAPI.
@@ -34,12 +33,13 @@ const (
 // Client talks to the TiDB Cloud Serverless OpenAPI using HTTP Digest
 // authentication with an API key (public/private).
 type Client struct {
-	baseURL      string
-	publicKey    string
-	privateKey   string
-	timeout      time.Duration
-	maxRetries   int
-	retryBackoff func(int) time.Duration
+	baseURL       string
+	quietNotFound bool
+	publicKey     string
+	privateKey    string
+	timeout       time.Duration
+	maxRetries    int
+	retryBackoff  func(int) time.Duration
 
 	baseTransport http.RoundTripper
 	httpClient    *http.Client
@@ -68,7 +68,7 @@ func WithTimeout(d time.Duration) Option {
 }
 
 // WithMaxRetries sets how many times retriable failures (network errors and
-// 401/429/5xx responses) are retried (default 5).
+// 429/5xx responses for non-POST methods) are retried (default 5).
 func WithMaxRetries(n int) Option {
 	return func(c *Client) {
 		if n >= 0 {
@@ -131,7 +131,13 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 
 	url := c.baseURL + path
 	var lastErr error
-	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+	maxRetries := c.maxRetries
+	// Digest challenge handling remains in digest.Transport. Business POSTs
+	// cannot be replayed when the server may already have committed a job.
+	if method == http.MethodPost {
+		maxRetries = 0
+	}
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			backoffDelay := backoff(attempt)
 			if c.retryBackoff != nil {
@@ -164,8 +170,8 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 				return ctx.Err()
 			}
 			lastErr = fmt.Errorf("tidbcloud: %s %s: %s", method, sanitizeLogText(path), sanitizeLogText(err.Error()))
-			if attempt == c.maxRetries {
-				logTiDBCloudRequestFailed(method, path, url, attempt, c.maxRetries, reqBody, req, nil, nil, lastErr)
+			if attempt == maxRetries {
+				logTiDBCloudRequestFailed(method, path, url, attempt, maxRetries, reqBody, req, nil, nil, lastErr)
 				return lastErr
 			}
 			continue
@@ -175,8 +181,8 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		resp.Body.Close()
 		if readErr != nil {
 			lastErr = fmt.Errorf("tidbcloud: read response body: %s", sanitizeLogText(readErr.Error()))
-			if attempt == c.maxRetries {
-				logTiDBCloudRequestFailed(method, path, url, attempt, c.maxRetries, reqBody, req, resp, nil, lastErr)
+			if attempt == maxRetries {
+				logTiDBCloudRequestFailed(method, path, url, attempt, maxRetries, reqBody, req, resp, nil, lastErr)
 				return lastErr
 			}
 			continue
@@ -186,7 +192,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 			if out != nil && len(respBody) > 0 {
 				if err := json.Unmarshal(respBody, out); err != nil {
 					decodeErr := fmt.Errorf("tidbcloud: decode response: %w", err)
-					logTiDBCloudResponseDecodeFailed(method, path, url, attempt, c.maxRetries, reqBody, req, resp, respBody, decodeErr)
+					logTiDBCloudResponseDecodeFailed(method, path, url, attempt, maxRetries, reqBody, req, resp, respBody, decodeErr)
 					return decodeErr
 				}
 			}
@@ -194,11 +200,13 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		}
 
 		apiErr := parseAPIError(resp.StatusCode, respBody)
-		if isRetriableStatus(resp.StatusCode) && attempt < c.maxRetries {
+		if isRetriableStatus(resp.StatusCode) && attempt < maxRetries {
 			lastErr = apiErr
 			continue
 		}
-		logTiDBCloudRequestFailed(method, path, url, attempt, c.maxRetries, reqBody, req, resp, respBody, apiErr)
+		if !c.quietNotFound || !IsNotFound(apiErr) {
+			logTiDBCloudRequestFailed(method, path, url, attempt, maxRetries, reqBody, req, resp, respBody, apiErr)
+		}
 		return apiErr
 	}
 	return lastErr
@@ -252,8 +260,7 @@ func backoff(attempt int) time.Duration {
 
 func isRetriableStatus(code int) bool {
 	switch code {
-	case http.StatusUnauthorized,
-		http.StatusTooManyRequests,
+	case http.StatusTooManyRequests,
 		http.StatusInternalServerError,
 		http.StatusBadGateway,
 		http.StatusServiceUnavailable,
