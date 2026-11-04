@@ -103,6 +103,20 @@ func TestResolverGatewayNotFound(t *testing.T) {
 	}
 	require.False(t, IsNotFound(parseAPIError(403, []byte(gatewayNotFound))))
 }
+
+func TestLegacyServerlessJobNotFound(t *testing.T) {
+	for _, message := range []string{
+		"fail to get cdc changefeed: record not found",
+		"fail to get export: record not found",
+	} {
+		body, err := json.Marshal(map[string]any{"code": 404, "message": message})
+		require.NoError(t, err)
+		require.True(t, IsNotFound(parseAPIError(404, body)))
+		require.False(t, IsNotFound(parseAPIError(500, body)))
+		require.False(t, IsNotFound(parseAPIError(403, body)))
+	}
+	require.False(t, IsNotFound(parseAPIError(404, []byte(`{"code":404,"message":"record not found"}`))))
+}
 func TestResolverDedicatedLegacyAndCustom(t *testing.T) {
 	c := resolvedClient(t, func(r *http.Request) (int, string) {
 		if r.URL.Host == "dedicated.tidbapi.com" {

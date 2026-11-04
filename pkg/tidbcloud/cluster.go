@@ -71,6 +71,11 @@ func IsNotFound(err error) bool {
 	if e.Code != http.StatusNotFound {
 		return false
 	}
+	// The legacy Serverless job endpoints return these service-level errors
+	// without RequestInfo. Keep generic gateway/route 404s unclassified.
+	if len(e.Details) == 0 && (e.Message == "fail to get cdc changefeed: record not found" || e.Message == "fail to get export: record not found") {
+		return true
+	}
 	for _, raw := range e.Details {
 		var detail struct {
 			Type        string `json:"@type"`
