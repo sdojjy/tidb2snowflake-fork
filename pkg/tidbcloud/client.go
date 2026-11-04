@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/icholy/digest"
@@ -159,6 +160,11 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 			return fmt.Errorf("tidbcloud: build request: %w", err)
 		}
 		req.Header.Set("Accept", "application/json")
+		if strings.HasPrefix(path, "/v1beta2/changefeeds") {
+			// Premium Changefeed defaults to protobuf snake_case responses.
+			// Negotiate the camelCase representation used by our wire DTOs.
+			req.Header.Set("Accept", "application/json+camel")
+		}
 		if reqBody != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}

@@ -94,9 +94,9 @@ func (r *Runner) Preflight(ctx context.Context, snapshot, incremental bool) erro
 		if err = r.validateChangefeedRCU(ctx); err != nil {
 			return err
 		}
-		// Snapshot creation produces the only missing input. In every other case
-		// reject a missing start point before attempting any source mutation.
-		if !createExport {
+		// A new or resumed export will produce the missing metadata before CDC
+		// creation. Otherwise require a start point before any source mutation.
+		if !needsExport {
 			if _, err = r.changefeedStartTSO(ctx); err != nil {
 				return err
 			}

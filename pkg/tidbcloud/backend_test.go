@@ -79,6 +79,30 @@ func TestResolverFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestResolverGatewayNotFound(t *testing.T) {
+	const gatewayNotFound = `{"code":404,"details":[{"@type":"type.tidbapi.com/tidb.rpc.RequestInfo","requestId":"test-request","servingData":"49900004"}],"message":"Cluster not found."}`
+	var hosts []string
+	c := resolvedClient(t, func(r *http.Request) (int, string) {
+		hosts = append(hosts, r.URL.Host)
+		if r.URL.Host == "serverless.tidbapi.com" {
+			return 404, gatewayNotFound
+		}
+		return 200, clusterJSON(Premium, "Premium")
+	})
+	b, err := c.OpenBackend(context.Background(), largeID, nil, false)
+	require.NoError(t, err)
+	require.Equal(t, Premium, b.Cluster.Family)
+	require.Equal(t, []string{"serverless.tidbapi.com", "cloud.tidbapi.com"}, hosts)
+	for _, body := range []string{
+		`{"code":404,"message":"Cluster not found."}`,
+		`{"code":404,"details":[{"@type":"other","servingData":"49900004"}]}`,
+		`{"code":404,"details":[{"@type":"type.tidbapi.com/tidb.rpc.RequestInfo","servingData":"49900003"}]}`,
+	} {
+		require.False(t, IsNotFound(parseAPIError(404, []byte(body))))
+	}
+	require.False(t, IsNotFound(parseAPIError(403, []byte(gatewayNotFound))))
+}
 func TestResolverDedicatedLegacyAndCustom(t *testing.T) {
 	c := resolvedClient(t, func(r *http.Request) (int, string) {
 		if r.URL.Host == "dedicated.tidbapi.com" {
@@ -114,6 +138,11 @@ func TestPremiumWireContract(t *testing.T) {
 	var exportBody, cfBody map[string]any
 	c := resolvedClient(t, func(r *http.Request) (int, string) {
 		require.Equal(t, "cloud.tidbapi.com", r.URL.Host)
+		if strings.HasPrefix(r.URL.Path, "/v1beta2/changefeeds") {
+			require.Equal(t, "application/json+camel", r.Header.Get("Accept"))
+		} else {
+			require.Equal(t, "application/json", r.Header.Get("Accept"))
+		}
 		switch r.Method + " " + r.URL.Path {
 		case "POST /v1beta2/tidbs/" + largeID + "/exports":
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&exportBody))
@@ -181,6 +210,21 @@ func TestCreatePostNeverBusinessRetries(t *testing.T) {
 			require.Equal(t, 1, calls)
 		})
 	}
+}
+
+func TestPremiumCapacityNegotiatesJSONNames(t *testing.T) {
+	c := resolvedClient(t, func(r *http.Request) (int, string) {
+		require.Equal(t, "/v1beta2/changefeeds:listCCUs", r.URL.Path)
+		if r.Header.Get("Accept") == "application/json+camel" {
+			return 200, `{"ccus":[{"name":"2ccu","ccuNum":2},{"name":"4ccu","ccuNum":4}]}`
+		}
+		return 200, `{"ccus":[{"name":"2ccu","ccu_num":2},{"name":"4ccu","ccu_num":4}]}`
+	})
+	b, err := c.BoundBackend(largeID, ClusterInfo{ClusterID: largeID, Family: Premium, Environment: "prod"})
+	require.NoError(t, err)
+	values, err := b.Capacities(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []int{2, 4}, values)
 }
 func TestDeleteUsesVerifiedOwnershipAndWaitsForConfirmation(t *testing.T) {
 	events := []string{}

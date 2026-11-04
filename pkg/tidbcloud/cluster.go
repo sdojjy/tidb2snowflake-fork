@@ -2,6 +2,7 @@ package tidbcloud
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -59,7 +60,27 @@ func CanonicalClusterID(id string) (string, error) {
 
 func IsNotFound(err error) bool {
 	var e *APIError
-	return errors.As(err, &e) && e.StatusCode == http.StatusNotFound && e.Code == 49900004
+	if !errors.As(err, &e) || e.StatusCode != http.StatusNotFound {
+		return false
+	}
+	if e.Code == 49900004 {
+		return true
+	}
+	// The public gateway can put the HTTP code at the top level and the
+	// management business code in RequestInfo. A generic 404 is not enough.
+	if e.Code != http.StatusNotFound {
+		return false
+	}
+	for _, raw := range e.Details {
+		var detail struct {
+			Type        string `json:"@type"`
+			ServingData string `json:"servingData"`
+		}
+		if json.Unmarshal(raw, &detail) == nil && detail.Type == "type.tidbapi.com/tidb.rpc.RequestInfo" && detail.ServingData == "49900004" {
+			return true
+		}
+	}
+	return false
 }
 
 // OpenBackend resolves a new cluster, or verifies a persisted source identity.
