@@ -414,10 +414,29 @@ func (r *Runner) validateExport(job *tidbcloud.Export) error {
 		return errors.New("saved export storage does not match configured snapshot prefix")
 	}
 	got := job.ExportOptions
-	if got == nil || got.FileType != want.ExportOptions.FileType || got.Compression != want.ExportOptions.Compression || !reflect.DeepEqual(got.Filter, want.ExportOptions.Filter) || !sameSelectors(got.ColumnSelectors, want.ExportOptions.ColumnSelectors) || !reflect.DeepEqual(got.CSVFormat, want.ExportOptions.CSVFormat) || !reflect.DeepEqual(got.EscapeBackslash, want.ExportOptions.EscapeBackslash) {
+	if got == nil || got.FileType != want.ExportOptions.FileType || got.Compression != want.ExportOptions.Compression || !reflect.DeepEqual(got.Filter, want.ExportOptions.Filter) || !sameSelectors(got.ColumnSelectors, want.ExportOptions.ColumnSelectors) || !r.sameExportFormat(got, want.ExportOptions) {
 		return errors.New("saved export format/filter does not match configuration")
 	}
 	return nil
+}
+
+func (r *Runner) sameExportFormat(got, want *tidbcloud.ExportOptions) bool {
+	// Serverless accepts these options but its response converter does not echo
+	// dialect or escapeBackslash. Compare every field it does return, and still
+	// reject explicit conflicting values. Premium returns both fields.
+	csv := got.CSVFormat
+	escape := got.EscapeBackslash
+	if r.backend.Cluster.Family == tidbcloud.Serverless {
+		if csv != nil && (csv.Dialect == "" || csv.Dialect == "UNSPECIFIED") {
+			copy := *csv
+			copy.Dialect = want.CSVFormat.Dialect
+			csv = &copy
+		}
+		if escape == nil {
+			escape = want.EscapeBackslash
+		}
+	}
+	return reflect.DeepEqual(csv, want.CSVFormat) && reflect.DeepEqual(escape, want.EscapeBackslash)
 }
 func (r *Runner) validateChangefeed(ctx context.Context, cf *tidbcloud.Changefeed) error {
 	if cf.Sink == nil || cf.Sink.Type != tidbcloud.ChangefeedTypeCloudStorage || cf.Sink.CloudStorage == nil {

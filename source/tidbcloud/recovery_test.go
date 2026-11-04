@@ -43,6 +43,33 @@ func recoveryRunner(t *testing.T, handler func(*http.Request) (int, string)) *Ru
 	return runner
 }
 
+func TestServerlessExportResponseOmitsDialectAndEscaping(t *testing.T) {
+	runner := recoveryRunner(t, nil)
+	require.NoError(t, runner.ensureBackend(context.Background()))
+	request := runner.exportSpec().Request
+	raw, err := json.Marshal(cloudapi.Export{ExportOptions: request.ExportOptions, Target: request.Target})
+	require.NoError(t, err)
+	var job cloudapi.Export
+	require.NoError(t, json.Unmarshal(raw, &job))
+	job.ExportOptions.CSVFormat.Dialect = "UNSPECIFIED"
+	job.ExportOptions.EscapeBackslash = nil
+	require.NoError(t, runner.validateExport(&job))
+	// Validation must not rewrite the API response.
+	require.Equal(t, cloudapi.ExportCSVDialect("UNSPECIFIED"), job.ExportOptions.CSVFormat.Dialect)
+	job.ExportOptions.CSVFormat.Separator = "|"
+	require.Error(t, runner.validateExport(&job))
+	job.ExportOptions.CSVFormat.Separator = ","
+	job.ExportOptions.CSVFormat.Dialect = cloudapi.ExportCSVDialectBigQuery
+	require.Error(t, runner.validateExport(&job))
+	job.ExportOptions.CSVFormat.Dialect = "UNSPECIFIED"
+	escape := true
+	job.ExportOptions.EscapeBackslash = &escape
+	require.Error(t, runner.validateExport(&job))
+	job.ExportOptions.EscapeBackslash = nil
+	runner.backend.Cluster.Family = cloudapi.Premium
+	require.Error(t, runner.validateExport(&job))
+}
+
 func TestUnknownCreateIsPersistedAndNeverReposted(t *testing.T) {
 	posts := 0
 	runner := recoveryRunner(t, func(r *http.Request) (int, string) {
